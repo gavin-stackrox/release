@@ -1,6 +1,7 @@
 approvers:
 - c-du
 - gavin-stackrox
+- gj262
 - misberner
 - msugakov
 - rtann
@@ -11,6 +12,7 @@ options: {}
 reviewers:
 - c-du
 - gavin-stackrox
+- gj262
 - misberner
 - msugakov
 - rtann
