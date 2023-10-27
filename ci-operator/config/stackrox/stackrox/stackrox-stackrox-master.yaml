@@ -54,6 +54,7 @@ tests:
   timeout: 5h0m0s
 - as: gke-ui-e2e-tests
   optional: true
+  run_if_changed: ^(ui|proto/(storage|api)|central/.+?/service)/
   steps:
     env:
       COLLECTION_METHOD: core_bpf

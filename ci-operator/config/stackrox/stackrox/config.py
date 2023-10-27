@@ -149,8 +149,16 @@ class JobEntry:
         return safe_get_attr(self.raw_entry, "always_run")
 
     @property
+    def has_run_if_changed(self):
+        return safe_get_attr(self.raw_entry, "run_if_changed") is not None
+
+    @property
     def run_if_changed(self):
         return safe_get_attr(self.raw_entry, "run_if_changed")
+
+    @property
+    def has_skip_if_only_changed(self):
+        return safe_get_attr(self.raw_entry, "skip_if_only_changed") is not None
 
     @property
     def skip_if_only_changed(self):
@@ -750,31 +758,78 @@ def write_summary(data, config_dir):
 
 
 def check_configs(data):
-    error_in_configs = False
+    configs_ok = True
 
     for config in data.configs:
         # check config for master and the release template - could also cover
-        # release branches if this proves useful.
+        # release branches if this check proves useful.
         if config.branch == 'master' or config.branch == 'release-x.y':
             if not check_config(config, data):
-                error_in_configs = True
+                configs_ok = False
 
-    if error_in_configs:
-        sys.exit(1)
+    return configs_ok
 
 
 def check_config(config, data):
     print(f'Checking config/ file: {config.short_filename}')
 
-    error_in_entries = False
+    config_ok = True
 
     for entry in config.unordered_entries:
         if entry.is_postsubmit or entry.is_cron:
             continue
         if not check_entry(entry, config, data):
-            error_in_entries = True
+            config_ok = False
 
-    return not error_in_entries
+    return config_ok
+
+
+def check_entry(entry, config, data):
+    entry_ok = True
+
+    print(f'> Checking config/ job: {config.short_filename}/{entry.name}')
+
+    if not entry.has_always_run and not entry.has_run_if_changed and not entry.has_skip_if_only_changed:
+        check_error(f"One of always_run, run_if_changed or skip_if_only_changed should be set in config/")
+        entry_ok = False
+
+    name = entry.name if config.variant is None else f"{config.variant}-{entry.name}"
+    job, job_file = find_job_for_entry(name, config.branch, data)
+    if job is None:
+        check_error(f"Cannot find a job/ file for {config.branch} {name}")            
+        return False
+
+    print(f'  With jobs/ job: {job_file.short_filename}/{job.name}')
+
+    if entry.has_always_run and entry.always_run != job.always_run:
+        check_error(f"There is a mismatch between always_run in config/ {entry.always_run} versus jobs/ {job.always_run}")
+        entry_ok = False
+
+    if entry.has_run_if_changed and entry.run_if_changed != job.run_if_changed:
+        # `make jobs` will fix this, it takes the value of config/ as
+        # authoritative.
+        check_error(f"""There is a mismatch between run_if_changed in config/ versus jobs/
+  {entry.run_if_changed}
+  {job.run_if_changed}""")
+        entry_ok = False
+    elif job.has_run_if_changed and not entry.has_run_if_changed:
+        check_error(f"""The value of run_if_changed should be copied to config/
+  {job.run_if_changed}""")
+        entry_ok = False
+
+    if entry.has_skip_if_only_changed and entry.skip_if_only_changed != job.skip_if_only_changed:
+        # `make jobs` will fix this, it takes the value of config/ as
+        # authoritative.
+        check_error(f"""There is a mismatch between skip_if_only_changed in config/ versus jobs/
+  {entry.skip_if_only_changed}
+  {job.skip_if_only_changed}""")
+        entry_ok = False
+    elif job.has_skip_if_only_changed and not entry.has_skip_if_only_changed:
+        check_error(f"""The value of skip_if_only_changed should be copied to config/
+  {job.skip_if_only_changed}""")
+        entry_ok = False
+
+    return entry_ok
 
 
 def find_job_for_entry(name, branch, data):
@@ -783,30 +838,12 @@ def find_job_for_entry(name, branch, data):
             continue
         for job in job_file.unordered_entries:
             if job.name == name:
-                return job
-    return None
+                return job, job_file
+    return None, None
 
 
 def check_error(msg):
     print(f"ERROR: {msg}")
-
-
-def check_entry(entry, config, data):
-    error_for_entry = False
-
-    print(f'> Checking config/ job: {config.short_filename}/{entry.name}')
-
-    if not entry.has_always_run and not entry.has_run_if_changed and not entry.has_skip_if_only_changed:
-        check_error(f"One of always_run, run_if_changed or skip_if_only_changed should be set in config/")
-        error_for_entry = True
-
-    name = entry.name if config.variant is None else f"{config.variant}-{entry.name}"
-    job = find_job_for_entry(name, config.branch, data)
-    if job is None:
-        check_error(f"Cannot find a job/ file for {config.branch} {name}")            
-        error_for_entry = True
-
-    return not error_for_entry
 
 
 def main():
@@ -815,7 +852,7 @@ def main():
                 description='Utility to help maintain CI configuration',
     )
     parser.add_argument('-s', '--summarize', help='generate a configuration summary in summary.html', action='store_true')
-    parser.add_argument('-c', '--check', help='validate configuration', action='store_true')
+    parser.add_argument('-c', '--check', help='validate configuration against stackrox repo rules', action='store_true')
     args = parser.parse_args()
 
     config_dir = pathlib.Path(__file__).parent
@@ -826,7 +863,19 @@ def main():
         write_summary(data, config_dir)
 
     if args.check:
-        check_configs(data)
+        if not check_configs(data):
+            print("""
+A configuration error was found in one or more config/ or jobs/ files.
+This script enforces the following rules for the stackrox/stackrox repo for
+postsubmit jobs:
+- config/ jobs must have one of always_run, run_if_changed or skip_if_only_changed.
+- The config/ and jobs/ values of always_run for a job must match. `make jobs`
+  will not update this.
+- The config/ and jobs/ values of run_if_changed and skip_if_only_changed for a job
+  must match. `make jobs` will update config/ to jobs/ but it will not update config/
+  if the value is not present.
+Ref: https://docs.ci.openshift.org/docs/architecture/ci-operator/#pre-submit-tests""")
+            sys.exit(1)
 
     if not args.summarize and not args.check:
         parser.error('One of --summarize or --check is expected')
